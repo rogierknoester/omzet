@@ -1,12 +1,39 @@
-use std::process::{Command, Output, Stdio};
+use std::{
+    io::{stdout, Read, Write},
+    process::{Command, Output, Stdio},
+    thread,
+};
+
+use run_script::ScriptOptions;
+use tracing::{debug, error, info};
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let runner = Runner::new();
 
     let mut workflow = Workflow::new("tester".to_owned());
-    workflow.register_task("Echo-er".to_owned(), None, "echo 123".to_owned());
-    workflow.register_task("Echo-er".to_owned(), None, "echo 567".to_owned());
+    workflow.register_task(
+        "Copier".to_owned(),
+        Some(
+            r#"
+                echo "Probing copy"
+                sleep 2
+                echo "awake"
+                sleep 2
+                exit 1
+            "#
+            .to_owned(),
+        ),
+        "cp /home/rogier/Downloads/bob.mkv /tmp/test/bob.mkv".to_owned(),
+    );
+    workflow.register_task(
+        "264 Encoder".to_owned(),
+        Some(r"exit 1".to_string()),
+        "ffmpeg -i /tmp/test/bob.mkv -c:v libx264 /tmp/test/bob_new.mkv".to_owned(),
+    );
 
+    // @todo generate "scratchpad" area
     runner.run_workflow(workflow);
 }
 
@@ -53,8 +80,23 @@ impl Workflow {
     }
 }
 
+/// Contains some basic information to perform the tasks.
+/// Such as the source file and the "current file" on which should be acted
+struct WorkflowContext {
+    source_file: String,
+    working_directory: String,
+    subject_file: String,
+}
+
 /// The Runner orchestrates the execution of a workflow
+#[derive(Debug)]
 struct Runner {}
+
+#[derive(Debug, PartialEq)]
+enum ProbeResult {
+    ShouldRun,
+    ShouldSkip,
+}
 
 impl Runner {
     fn new() -> Self {
@@ -64,27 +106,91 @@ impl Runner {
     /// Will synchronously run the workflow's tasks
     /// and produce a [`WorkflowReport`]
     fn run_workflow(&self, workflow: Workflow) {
+        info!("Starting workflow: {}", &workflow.name);
+
         let tasks = workflow.tasks.clone();
 
         let mut workflow_report = WorkflowReport::new(workflow);
 
-        for task in tasks.iter() {
-            println!("Running task \"{}\"", task.name);
+        info!("Running probes to determine tasks");
+        let tasks_to_run = tasks
+            .into_iter()
+            .filter(|task| match &task.probe {
+                Some(probe) => self.run_probe(probe.as_str()) == ProbeResult::ShouldRun,
+                None => true,
+            })
+            .collect::<Vec<Task>>();
 
-            let stdout = Stdio::piped();
-            let stderr = Stdio::piped();
-            let child = Command::new("sh")
-                .arg("-c")
-                .arg(&task.command)
-                .stdout(stdout)
-                .stderr(stderr)
-                .spawn()
-                .expect("unable to run task");
-
-            workflow_report.register_report(TaskReport::from(child));
+        if tasks_to_run.is_empty() {
+            info!("No probes requested to run");
+            return;
         }
 
-        println!("{:?}", workflow_report)
+        info!("Running {} tasks", tasks_to_run.len());
+
+        for task in tasks_to_run.into_iter() {
+            let task_name = task.name.clone();
+            info!("Running task \"{}\"", task_name);
+
+            workflow_report.register_report(self.run_task(task));
+            info!("Completed task \"{}\"", task_name);
+        }
+
+        //info!("{:?}", workflow_report)
+    }
+
+    /// Runs the probe
+    fn run_probe(&self, probe: &str) -> ProbeResult {
+        let options = ScriptOptions::new();
+        let args = vec![];
+        let mut child = run_script::spawn(probe, &args, &options).expect("able to spawn child");
+
+        let mut child_stdout = child.stdout.take().unwrap();
+
+        let thread = thread::spawn(move || {
+            let mut buffer = [0; 1024];
+            loop {
+                let n = child_stdout.read(&mut buffer);
+                match n {
+                    Ok(n) if n > 0 => {
+                        stdout().write_all(&buffer[..n]).unwrap();
+                        stdout().flush().unwrap();
+                    }
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(error) => {
+                        error!("Error while reading from child process output. {}", error);
+                        break;
+                    }
+                }
+            }
+        });
+
+        let result = child.wait();
+        let _ = thread.join();
+
+        match result {
+            Err(_) => ProbeResult::ShouldSkip,
+            Ok(exit_code) => match exit_code.code().unwrap() {
+                0 => ProbeResult::ShouldRun,
+                _ => ProbeResult::ShouldSkip,
+            },
+        }
+    }
+
+    #[tracing::instrument]
+    fn run_task(&self, task: Task) -> TaskReport {
+        let stdout = Stdio::piped();
+        let stderr = Stdio::piped();
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(&task.command)
+            .stdout(stdout)
+            .stderr(stderr)
+            .output()
+            .expect("unable to run task");
+
+        TaskReport::from(child)
     }
 }
 

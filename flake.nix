@@ -1,5 +1,5 @@
 {
-  description = "dodo";
+  description = "omzet";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
