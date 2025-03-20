@@ -1,11 +1,15 @@
+use core::fmt;
 use std::{
+    fs,
     io::{stdout, Read, Write},
+    path::Path,
     process::{Command, Output, Stdio},
     thread,
 };
 
 use run_script::ScriptOptions;
 use tracing::{debug, error, info};
+use uuid::Uuid;
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -33,8 +37,13 @@ fn main() {
         "ffmpeg -i /tmp/test/bob.mkv -c:v libx264 /tmp/test/bob_new.mkv".to_owned(),
     );
 
+    let context = WorkflowContext::generate(
+        "/home/rogier/Downloads/bob.mkv".to_string(),
+        "/tmp/omzet/".to_string(),
+    );
+
     // @todo generate "scratchpad" area
-    runner.run_workflow(workflow);
+    runner.run_workflow(workflow, context);
 }
 
 #[derive(Debug, Clone)]
@@ -83,9 +92,34 @@ impl Workflow {
 /// Contains some basic information to perform the tasks.
 /// Such as the source file and the "current file" on which should be acted
 struct WorkflowContext {
-    source_file: String,
-    working_directory: String,
-    subject_file: String,
+    /// The path of the source file that tasks should be executed against.
+    source_file_path: String,
+
+    /// The scratchpad directory is where all tasks are performed. With this approach we can leave
+    /// the source file as-is until we're fully done.
+    scratchpad_directory: String,
+
+    /// The subject file is the file that is being transformed and will mutate throughout all
+    /// tasks. Before the first task it will be copied into the scratchpad directory from the
+    /// source_file_path
+    subject_file_path: String,
+}
+
+impl WorkflowContext {
+    fn generate(source_file_path: String, scratchpad_directory: String) -> Self {
+        let subject_file = generate_subject_file(&source_file_path);
+        Self {
+            source_file_path,
+            scratchpad_directory,
+            subject_file_path: subject_file,
+        }
+    }
+}
+
+fn generate_subject_file(source_file: &str) -> String {
+    let uuid = Uuid::new_v4();
+
+    format!("{}.{}", source_file, uuid)
 }
 
 /// The Runner orchestrates the execution of a workflow
@@ -105,14 +139,15 @@ impl Runner {
 
     /// Will synchronously run the workflow's tasks
     /// and produce a [`WorkflowReport`]
-    fn run_workflow(&self, workflow: Workflow) {
-        info!("Starting workflow: {}", &workflow.name);
+    fn run_workflow(&self, workflow: Workflow, context: WorkflowContext) {
+        info!("starting workflow: {}", &workflow.name);
+        prepare_scratchpad(context);
 
         let tasks = workflow.tasks.clone();
 
         let mut workflow_report = WorkflowReport::new(workflow);
 
-        info!("Running probes to determine tasks");
+        info!("running probes to determine tasks");
         let tasks_to_run = tasks
             .into_iter()
             .filter(|task| match &task.probe {
@@ -122,18 +157,18 @@ impl Runner {
             .collect::<Vec<Task>>();
 
         if tasks_to_run.is_empty() {
-            info!("No probes requested to run");
+            info!("no probes requested to run");
             return;
         }
 
-        info!("Running {} tasks", tasks_to_run.len());
+        info!("running {} tasks", tasks_to_run.len());
 
         for task in tasks_to_run.into_iter() {
             let task_name = task.name.clone();
-            info!("Running task \"{}\"", task_name);
+            info!("running task \"{}\"", task_name);
 
             workflow_report.register_report(self.run_task(task));
-            info!("Completed task \"{}\"", task_name);
+            info!("completed task \"{}\"", task_name);
         }
 
         //info!("{:?}", workflow_report)
@@ -194,6 +229,35 @@ impl Runner {
     }
 }
 
+/// Prepare the scratchpad. In practice this means creating the directory where transformations are
+/// done, copying the source file in, etc.
+fn prepare_scratchpad(context: WorkflowContext) {
+    debug!(
+        "creating scratchpad directory at {}",
+        context.scratchpad_directory
+    );
+
+    let scratchpad_path = Path::new(context.scratchpad_directory.as_str());
+    fs::create_dir_all(scratchpad_path).expect("able to create scratchpad directory");
+
+    let subject_file = Path::new(context.subject_file_path.as_str())
+        .file_name()
+        .unwrap();
+
+    let subject_file_path = format!(
+        "{}{}",
+        context.scratchpad_directory,
+        subject_file.to_str().unwrap()
+    );
+
+    debug!(
+        "copying source file into scratchpad directory at {}",
+        subject_file_path
+    );
+    fs::copy(context.source_file_path, subject_file_path)
+        .expect("able to copy source file into scratchpad");
+}
+
 #[derive(Debug)]
 struct WorkflowReport {
     workflow: Workflow,
@@ -227,5 +291,18 @@ impl From<Output> for TaskReport {
             stdout: String::from_utf8(value.stdout).expect("cannot get out of task"),
             stderr: String::from_utf8(value.stderr).expect("cannot get out of task"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_subject_file_generation() {
+        let source_file = "/tmp/test_file.mkv";
+        let subject_file = generate_subject_file(source_file);
+
+        assert!(subject_file.len() == source_file.len() + 37);
     }
 }
