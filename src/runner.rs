@@ -1,28 +1,51 @@
 use run_script::ScriptOptions;
 use std::{
+    collections::HashMap,
     fs::{self},
-    io::{stdout, Read, Write},
-    path::Path,
-    process::{Command, Output, Stdio},
-    thread,
+    io::{BufRead, BufReader},
+    ops::Deref,
+    path::{Path, PathBuf},
+    process::Output,
 };
 use uuid::Uuid;
 
-use anyhow::Result;
 use tracing::{debug, error, info};
 
 use crate::{workflow::Task, Workflow};
 
-pub(crate) struct SourceFile(String);
+pub(crate) struct SourceFilePath(String);
 
-impl SourceFile {
+impl Deref for SourceFilePath {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl SourceFilePath {
     pub(crate) fn new(path: String) -> Self {
         Self(path)
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum RunnerError {
+    #[error("preparation for the workflow failed: {0}")]
+    PreparationFailed(String),
+
+    #[error("a task probe was aborted")]
+    ProbeAborted,
+}
+
+/// A runner is able to execute a workflow for a given file. It should provide a
+/// [`WorkflowReport`] once it finishes the workflow.
 pub(crate) trait Runner {
-    fn run_workflow(&self, workflow: Workflow, source_file: SourceFile) -> Result<WorkflowReport>;
+    fn run_workflow(
+        &self,
+        workflow: Workflow,
+        source_file: SourceFilePath,
+    ) -> Result<WorkflowReport, RunnerError>;
 }
 
 #[derive(Debug)]
@@ -39,8 +62,11 @@ impl WorkflowReport {
         }
     }
 
-    fn register_report(&mut self, report: TaskReport) {
-        self.task_reports.push(report);
+    fn with_reports(self, task_reports: Vec<TaskReport>) -> Self {
+        Self {
+            workflow: self.workflow,
+            task_reports,
+        }
     }
 }
 
@@ -70,6 +96,15 @@ pub(crate) struct DefaultRunner {}
 enum ProbeResult {
     ShouldRun,
     ShouldSkip,
+    ShouldAbort,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ScratchpadError {
+    #[error("unable to create scratchpad directory")]
+    UnableToCreate(#[source] std::io::Error),
+    #[error("unable to copy in source file")]
+    UnableToCopySourceFile(#[source] std::io::Error),
 }
 
 impl DefaultRunner {
@@ -77,122 +112,241 @@ impl DefaultRunner {
         Self {}
     }
 
-    fn prepare_scratchpad(&self, scratchpad_directory: &str, source_file: &SourceFile) {
+    /// Create the area where file transformations can be done
+    fn prepare_scratchpad(
+        &self,
+        scratchpad_directory: &str,
+        source_file_path: &SourceFilePath,
+    ) -> Result<String, ScratchpadError> {
         debug!("creating scratchpad directory at {}", scratchpad_directory);
 
         let scratchpad_path = Path::new(&scratchpad_directory);
-        fs::create_dir_all(scratchpad_path).expect("able to create scratchpad directory");
+        fs::create_dir_all(scratchpad_path).map_err(ScratchpadError::UnableToCreate)?;
 
-        let target_file_name = generate_target_file(&source_file.0);
+        let target_file_name = generate_target_file(source_file_path);
+        debug!("generated target file name: {}", target_file_name);
 
-        let target_file_path = format!("{}{}", scratchpad_directory, target_file_name);
+        let target_file_path = Path::new(scratchpad_directory)
+            .join(PathBuf::from(&target_file_name))
+            .into_os_string()
+            .into_string()
+            .expect("unable to create target file path");
 
         debug!(
             "copying source file into scratchpad directory at {}",
             target_file_path
         );
-        fs::copy(&source_file.0, target_file_path)
-            .expect("able to copy source file into scratchpad");
+        fs::copy(&source_file_path.0, target_file_path)
+            .map_err(ScratchpadError::UnableToCopySourceFile)
+            .map(|_| target_file_name)
     }
 
     /// Runs the probe
-    fn run_probe(&self, probe: &str) -> ProbeResult {
-        let options = ScriptOptions::new();
-        let args = vec![];
-        let mut child = run_script::spawn(probe, &args, &options).expect("able to spawn child");
-
-        let mut child_stdout = child.stdout.take().unwrap();
-
-        let thread = thread::spawn(move || {
-            let mut buffer = [0; 1024];
-            loop {
-                let n = child_stdout.read(&mut buffer);
-                match n {
-                    Ok(n) if n > 0 => {
-                        stdout().write_all(&buffer[..n]).unwrap();
-                        stdout().flush().unwrap();
-                    }
-                    Ok(0) => break,
-                    Ok(_) => continue,
-                    Err(error) => {
-                        error!("Error while reading from child process output. {}", error);
-                        break;
-                    }
-                }
-            }
-        });
-
-        let result = child.wait();
-        let _ = thread.join();
-
-        match result {
-            Err(_) => ProbeResult::ShouldSkip,
-            Ok(exit_code) => match exit_code.code().unwrap() {
+    fn run_probe(
+        &self,
+        probe: &str,
+        target_file_name: &str,
+        scratchpad_directory: &str,
+    ) -> ProbeResult {
+        match run_script(
+            probe,
+            Some(HashMap::from([(
+                "OMZET_INPUT".to_owned(),
+                target_file_name.to_string(),
+            )])),
+            scratchpad_directory,
+        ) {
+            Ok((exit_code, _output, _stderr)) => match exit_code {
                 0 => ProbeResult::ShouldRun,
                 _ => ProbeResult::ShouldSkip,
             },
+            Err(_) => ProbeResult::ShouldAbort,
         }
     }
 
-    fn run_task(&self, task: &Task) -> TaskReport {
-        let stdout = Stdio::piped();
-        let stderr = Stdio::piped();
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(&task.command)
-            .stdout(stdout)
-            .stderr(stderr)
-            .output()
-            .expect("unable to run task");
+    fn run_task(
+        &self,
+        task: &Task,
+        target_file_name: &str,
+        scratchpad_directory: &str,
+    ) -> TaskReport {
+        // @todo lift this up, it's deterministic for target name
+        let output_file_name = generate_output_file_name(target_file_name);
 
-        TaskReport::from(child)
+        let env_vars: HashMap<String, String> = HashMap::from([
+            ("OMZET_INPUT".to_owned(), target_file_name.to_string()),
+            ("OMZET_OUTPUT".to_owned(), output_file_name),
+        ]);
+
+        let result = run_script(&task.command, Some(env_vars), scratchpad_directory)
+            .expect("failed to run task script");
+
+        // @todo check if output file exists now
+        //       mv/rename it to target file, i.e. clean up and finish the task
+
+        TaskReport {
+            exit_code: Some(result.0),
+            stdout: result.1,
+            stderr: result.2,
+        }
     }
+}
+
+/// Run a script. For example a task's command or probe.
+fn run_script(
+    script: &str,
+    env_vars: Option<HashMap<String, String>>,
+    working_directory: &str,
+) -> Result<(i32, String, String), String> {
+    let mut options = ScriptOptions::new();
+
+    if let Some(env_vars) = env_vars {
+        options.env_vars = Some(env_vars);
+    }
+
+    options.working_directory = Some(PathBuf::from(working_directory));
+
+    let args = vec![];
+
+    let mut child = run_script::spawn(script, &args, &options)
+        .expect("failed to spawn child when running script");
+
+    let child_stdout = child
+        .stdout
+        .take()
+        .expect("failed to get stdout of child process");
+
+    let child_stderr = child
+        .stderr
+        .take()
+        .expect("failed to get stderr of child process");
+
+    let mut stdout_reader = BufReader::new(child_stdout);
+    let mut stderr_reader = BufReader::new(child_stderr);
+
+    let mut stdout_lines = String::new();
+    let mut stderr_lines = String::new();
+    let mut current_line = String::new();
+
+    while stdout_reader.read_line(&mut current_line).unwrap_or(0) > 0 {
+        debug!("stdout: {}", current_line.trim_end());
+        stdout_lines.push_str(&current_line);
+        current_line.clear();
+    }
+
+    while stderr_reader.read_line(&mut current_line).unwrap_or(0) > 0 {
+        debug!("stderr: {}", current_line.trim_end());
+        stderr_lines.push_str(&current_line);
+        current_line.clear();
+    }
+
+    let result = child.wait().expect("failed to wait for child");
+
+    Ok((
+        result.code().expect("child was terminal by a signal"),
+        stdout_lines,
+        stderr_lines,
+    ))
 }
 
 impl Runner for DefaultRunner {
     /// Will synchronously run the workflow's tasks
     /// and produce a [`WorkflowReport`]
-    fn run_workflow(&self, workflow: Workflow, source_file: SourceFile) -> Result<WorkflowReport> {
+    fn run_workflow(
+        &self,
+        workflow: Workflow,
+        source_file: SourceFilePath,
+    ) -> Result<WorkflowReport, RunnerError> {
         info!("starting workflow: {}", &workflow.name);
 
-        self.prepare_scratchpad(&workflow.scratchpad_directory, &source_file);
-
-        let tasks = workflow.tasks.clone();
-
-        let mut workflow_report = WorkflowReport::new(workflow);
+        let target_file_name = self
+            .prepare_scratchpad(&workflow.scratchpad_directory, &source_file)
+            .map_err(|err| RunnerError::PreparationFailed(err.to_string()))?;
 
         info!("running probes to determine tasks");
-        let tasks_to_run: Vec<Task> = tasks
-            .into_iter()
-            .filter(|task| match &task.probe {
-                Some(probe) => self.run_probe(probe.as_str()) == ProbeResult::ShouldRun,
-                None => true,
+        let tasks = workflow.tasks.clone();
+
+        let probe_results: Vec<(&Task, ProbeResult)> = tasks
+            .iter()
+            .map(|task| match &task.probe {
+                Some(probe) => (
+                    task,
+                    self.run_probe(probe, &target_file_name, &workflow.scratchpad_directory),
+                ),
+                None => (task, ProbeResult::ShouldRun),
             })
+            .collect();
+
+        let has_aborted_probe_result = probe_results
+            .iter()
+            .any(|(_, probe_result)| *probe_result == ProbeResult::ShouldAbort);
+
+        if has_aborted_probe_result {
+            return Err(RunnerError::ProbeAborted);
+        }
+
+        let tasks_to_run: Vec<&Task> = probe_results
+            .into_iter()
+            .filter(|(_task, probe_result)| match probe_result {
+                ProbeResult::ShouldRun => true,
+                ProbeResult::ShouldSkip => false,
+                ProbeResult::ShouldAbort => false,
+            })
+            .map(|(task, _probe_result)| task)
             .collect();
 
         if tasks_to_run.is_empty() {
             info!("no probes requested to run");
-            return Ok(workflow_report);
+            return Ok(WorkflowReport::new(workflow));
         }
 
         info!("running {} tasks", tasks_to_run.len());
 
+        let mut task_reports: Vec<TaskReport> = vec![];
+
         for task in tasks_to_run.into_iter() {
             info!("running task \"{}\"", &task.name);
 
-            workflow_report.register_report(self.run_task(&task));
+            let task_run_result =
+                self.run_task(&task, &target_file_name, &workflow.scratchpad_directory);
+
+            task_reports.push(task_run_result);
+
             info!("completed task \"{}\"", &task.name);
         }
 
-        Ok(workflow_report)
+        Ok(WorkflowReport::new(workflow).with_reports(task_reports))
     }
 }
 
 /// Generate a target file from the source file
-fn generate_target_file(source_file: &str) -> String {
+fn generate_target_file(source_file_path: &str) -> String {
     let uuid = Uuid::new_v4();
 
-    format!("{}.{}", source_file, uuid)
+    let path = Path::new(source_file_path);
+
+    let file_name = path.file_stem().expect("failed to take file name");
+    let extension = path.extension().expect("failed to take file extension");
+
+    format!(
+        "{}-{}.{}",
+        file_name.to_string_lossy(),
+        uuid,
+        extension.to_string_lossy()
+    )
+}
+
+fn generate_output_file_name(target_file_name: &str) -> String {
+    let path = Path::new(target_file_name);
+
+    let file_name = path.file_stem().expect("failed to take file name");
+    let extension = path.extension().expect("failed to take file extension");
+
+    format!(
+        "{}.out.{}",
+        file_name.to_string_lossy(),
+        extension.to_string_lossy()
+    )
 }
 
 #[cfg(test)]
@@ -204,6 +358,6 @@ mod tests {
         let source_file = "/tmp/test_file.mkv";
         let subject_file = generate_target_file(source_file);
 
-        assert!(subject_file.len() == source_file.len() + 37);
+        assert!(subject_file.len() == "test_file.mkv".len() + 37);
     }
 }
