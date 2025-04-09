@@ -47,7 +47,7 @@ fn main() {
         "ffmpeg -i /tmp/test/bob.mkv -c:v libx264 /tmp/test/bob_new.mkv".to_owned(),
     );
 
-    let source_file_path = SourceFilePath::new("/home/rogier/Downloads/bob.mkv".to_string());
+    let source_file_path = SourceFilePath::new("/tmp/omzet/bob.mkv".to_string());
 
     let result = runner.run_workflow(workflow, source_file_path);
 
