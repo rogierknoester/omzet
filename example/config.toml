@@ -1,0 +1,26 @@
+[libraries.main]
+directory = "/tmp/omzet/src"
+workflow = "example"
+
+[workflows.example]
+scratchpad_directory = "/tmp/omzet/cache"
+
+
+[[workflows.example.tasks]]
+name = "h265 encoder"
+probe = '''
+    echo "Probing if $OMZET_TASK is needed"
+    sleep 2 # doing some logic
+    exit 0 # an exit code of 0 indicates that the task needs to run
+'''
+command = '''
+    echo "input: $OMZET_INPUT"
+    echo "output: $OMZET_OUTPUT"
+
+    ffmpeg -i $OMZET_INPUT -c:v libx265 -c:a copy -t 5 $OMZET_OUTPUT
+'''
+
+[[workflows.example.tasks]]
+name = "example: skipped probe"
+probe = "exit 1"
+

@@ -1,7 +1,9 @@
+use serde::Deserialize;
+
 /// A workflow defines which things need to happen when a new file is detected
 /// @todo add some "context" in which variables can be stored
 ///
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Clone)]
 pub(crate) struct Workflow {
     pub(crate) name: String,
     pub(crate) tasks: Vec<Task>,
@@ -22,7 +24,7 @@ impl Workflow {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Task {
     /// The name of a task
     pub(crate) name: String,

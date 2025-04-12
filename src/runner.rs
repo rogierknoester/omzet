@@ -47,7 +47,7 @@ pub(crate) enum RunnerError {
 pub(crate) trait Runner {
     fn run_workflow(
         &self,
-        workflow: Workflow,
+        workflow: &Workflow,
         source_file: SourceFilePath,
     ) -> Result<WorkflowReport, RunnerError>;
 }
@@ -305,7 +305,7 @@ impl Runner for DefaultRunner {
     /// and produce a [`WorkflowReport`]
     fn run_workflow(
         &self,
-        workflow: Workflow,
+        workflow: &Workflow,
         source_file: SourceFilePath,
     ) -> Result<WorkflowReport, RunnerError> {
         info!("starting workflow: {}", &workflow.name);
@@ -343,7 +343,7 @@ impl Runner for DefaultRunner {
 
         if tasks_to_run.is_empty() {
             info!("no probes requested to run");
-            return Ok(WorkflowReport::new(workflow));
+            return Ok(WorkflowReport::new(workflow.clone()));
         }
 
         info!("running {} tasks", tasks_to_run.len());
@@ -362,7 +362,7 @@ impl Runner for DefaultRunner {
 
         self.complete_run(&context)?;
 
-        Ok(WorkflowReport::new(workflow).with_reports(task_reports))
+        Ok(WorkflowReport::new(workflow.clone()).with_reports(task_reports))
     }
 }
 
