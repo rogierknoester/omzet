@@ -3,12 +3,14 @@ use std::{
     process::exit,
 };
 
+use app::App;
 use config::read_config;
 use runner::{DefaultRunner, Runner, SourceFilePath};
-use tracing::{error, info, level_filters::LevelFilter};
+use tracing::{debug, error, info, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use workflow::Workflow;
 
+mod app;
 mod config;
 mod runner;
 mod workflow;
@@ -33,6 +35,20 @@ fn main() {
         }
     };
 
+    let app = App::new(config);
+
+    match app.run() {
+        Ok(_) => {
+            debug!("exiting omzet");
+            exit(0);
+        }
+        Err(err) => {
+            error!("an error occurred");
+            error!("{}", err);
+            exit(1);
+        }
+    }
+
     let runner = DefaultRunner::new();
 
     let source_file_path = SourceFilePath::new("/tmp/omzet/bob.mkv".to_string());
@@ -42,7 +58,7 @@ fn main() {
         .get("example")
         .expect("unable to take workflow");
 
-    let result = runner.run_workflow(&workflow, source_file_path);
+    let result = runner.run_workflow(workflow, source_file_path);
 
     match result {
         Ok(_) => info!("performed workflow"),

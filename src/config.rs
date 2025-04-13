@@ -27,6 +27,8 @@ pub(crate) enum ConfigError {
     UnableToReadConfiguration(std::io::Error),
     #[error("unable to deserialize config toml: {0}")]
     UnableToDeserialize(toml::de::Error),
+    #[error("workflow with name \"{0}\" does not exist")]
+    WorkflowDoesNotExist(String),
 }
 
 const EXAMPLE_CONFIG: &str = include_str!("../example/config.toml");
@@ -72,8 +74,16 @@ pub(crate) struct Config {
     pub(crate) workflows: HashMap<String, Workflow>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub(crate) struct Library {
     pub(crate) directory: String,
     pub(crate) workflow: String,
+}
+
+impl Config {
+    pub(crate) fn get_workflow(&self, name: &str) -> Result<&Workflow, ConfigError> {
+        self.workflows
+            .get(name)
+            .ok_or(ConfigError::WorkflowDoesNotExist(name.to_string()))
+    }
 }

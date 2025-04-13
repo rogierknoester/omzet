@@ -254,6 +254,8 @@ fn run_script(
 ) -> Result<(i32, String, String), String> {
     let mut options = ScriptOptions::new();
 
+    options.exit_on_error = true;
+    options.print_commands = true;
     options.env_vars = Some(env_vars);
     options.working_directory = Some(PathBuf::from(working_directory));
 
