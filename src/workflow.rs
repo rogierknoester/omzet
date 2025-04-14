@@ -1,27 +1,12 @@
 use serde::Deserialize;
 
 /// A workflow defines which things need to happen when a new file is detected
-/// @todo add some "context" in which variables can be stored
-///
 #[derive(Debug, Deserialize, Clone)]
 pub(crate) struct Workflow {
     pub(crate) name: String,
-    pub(crate) tasks: Vec<Task>,
     pub(crate) scratchpad_directory: String,
-}
-
-impl Workflow {
-    pub(crate) fn new(name: String, scratchpad_directory: String) -> Self {
-        Self {
-            name,
-            tasks: Vec::new(),
-            scratchpad_directory,
-        }
-    }
-
-    pub(crate) fn register_task(&mut self, name: String, probe: Option<String>, command: String) {
-        self.tasks.push(Task::new(name, probe, command));
-    }
+    pub(crate) included_extensions: Vec<String>,
+    pub(crate) tasks: Vec<Task>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

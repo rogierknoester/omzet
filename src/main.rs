@@ -16,14 +16,7 @@ mod runner;
 mod workflow;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    setup_logging();
 
     let config = match read_config() {
         Ok(config) => config,
@@ -43,7 +36,7 @@ fn main() {
             exit(0);
         }
         Err(err) => {
-            error!("an error occurred");
+            error!("exiting omzet because an error occurred, see below.");
             error!("{}", err);
             exit(1);
         }
@@ -64,4 +57,16 @@ fn main() {
         Ok(_) => info!("performed workflow"),
         Err(err) => error!("unable to perform workflow: {}", err),
     }
+}
+
+fn setup_logging() {
+    tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .with_thread_names(true)
+        .init();
 }

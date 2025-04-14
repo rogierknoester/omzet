@@ -27,7 +27,7 @@ pub(crate) enum ConfigError {
     UnableToReadConfiguration(std::io::Error),
     #[error("unable to deserialize config toml: {0}")]
     UnableToDeserialize(toml::de::Error),
-    #[error("workflow with name \"{0}\" does not exist")]
+    #[error("workflow with name \"{0}\", referenced in config, does not exist")]
     WorkflowDoesNotExist(String),
 }
 
