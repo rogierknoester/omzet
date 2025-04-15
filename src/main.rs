@@ -14,6 +14,7 @@ mod app;
 mod config;
 mod runner;
 mod workflow;
+mod job_orchestration;
 
 fn main() {
     setup_logging();
