@@ -5,16 +5,16 @@ use std::{
 
 use app::App;
 use config::read_config;
-use runner::{DefaultRunner, Runner, SourceFilePath};
-use tracing::{debug, error, info, level_filters::LevelFilter};
+use runner::{DefaultRunner, SourceFilePath};
+use tracing::{debug, error, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use workflow::Workflow;
 
 mod app;
 mod config;
+mod job_orchestration;
 mod runner;
 mod workflow;
-mod job_orchestration;
 
 fn main() {
     setup_logging();
@@ -41,22 +41,6 @@ fn main() {
             error!("{}", err);
             exit(1);
         }
-    }
-
-    let runner = DefaultRunner::new();
-
-    let source_file_path = SourceFilePath::new("/tmp/omzet/bob.mkv".to_string());
-
-    let workflow = config
-        .workflows
-        .get("example")
-        .expect("unable to take workflow");
-
-    let result = runner.run_workflow(workflow, source_file_path);
-
-    match result {
-        Ok(_) => info!("performed workflow"),
-        Err(err) => error!("unable to perform workflow: {}", err),
     }
 }
 

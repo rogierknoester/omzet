@@ -1,8 +1,12 @@
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::{
+    sync::mpsc::{channel, Receiver, Sender},
+    thread::sleep,
+    time::Duration,
+};
 
-use tracing::info;
+use tracing::{error, info};
 
-use crate::Workflow;
+use crate::{runner::WorkflowRunner, DefaultRunner, SourceFilePath, Workflow};
 
 pub(crate) struct Job {
     /// The absolute path to the file for this job
@@ -30,6 +34,7 @@ pub(crate) struct JobOrchestrator {
 }
 
 impl JobOrchestrator {
+    /// Create a new orchestrator and a sender to be used to communicate with it
     pub(crate) fn new() -> (Self, Sender<Box<Job>>) {
         let (sender, receiver) = create_channel();
         (
@@ -41,9 +46,22 @@ impl JobOrchestrator {
     }
 
     pub(crate) fn start(&self) {
+        let runner = DefaultRunner::new();
+
         loop {
-            if let Ok(x) = self.job_receiver.recv() {
-                info!("received job for library {}", x.library);
+            if let Ok(job) = self.job_receiver.recv() {
+                sleep(Duration::from_secs(5));
+                info!(
+                    "received job for library {} with file {}",
+                    job.library, job.file_path
+                );
+
+                let result = runner.run_workflow(&job.workflow, SourceFilePath::new(job.file_path));
+
+                match result {
+                    Ok(_) => info!("performed workflow"),
+                    Err(err) => error!("unable to perform workflow: {}", err),
+                }
             }
         }
     }

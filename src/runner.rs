@@ -32,19 +32,19 @@ impl SourceFilePath {
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum RunnerError {
-    #[error("preparation for the workflow failed: {0}")]
-    PreparationFailed(String),
+    #[error(transparent)]
+    PreparationFailed(#[from] PreparationError),
 
     #[error("a task probe was aborted")]
     ProbeAborted,
 
-    #[error("completion of the workflow failed: {0}")]
-    CompletionFailed(String),
+    #[error(transparent)]
+    CompletionFailed(#[from] CompletionError),
 }
 
 /// A runner is able to execute a workflow for a given file. It should provide a
 /// [`WorkflowReport`] once it finishes the workflow.
-pub(crate) trait Runner {
+pub(crate) trait WorkflowRunner {
     fn run_workflow(
         &self,
         workflow: &Workflow,
@@ -98,35 +98,23 @@ pub(crate) struct DefaultRunner {}
 
 #[derive(Debug, PartialEq)]
 enum ProbeResult {
-    ShouldRun,
-    ShouldSkip,
-    ShouldAbort,
+    Run,
+    Skip,
+    Abort,
 }
 
 #[derive(Debug, thiserror::Error)]
-enum PreparationError {
-    #[error("unable to create scratchpad directory")]
+pub(crate) enum PreparationError {
+    #[error("unable to create scratchpad directory: {0}")]
     UnableToCreateScratchpad(#[source] std::io::Error),
-    #[error("unable to copy in source file")]
+    #[error("unable to copy in source file: {0}")]
     UnableToCopySourceFile(#[source] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
-enum CompletionError {
+pub(crate) enum CompletionError {
     #[error("unable to move transformed file to source path")]
     UnableToMoveFile(#[source] std::io::Error),
-}
-
-impl From<CompletionError> for RunnerError {
-    fn from(value: CompletionError) -> Self {
-        RunnerError::CompletionFailed(value.to_string())
-    }
-}
-
-impl From<PreparationError> for RunnerError {
-    fn from(value: PreparationError) -> Self {
-        RunnerError::PreparationFailed(value.to_string())
-    }
 }
 
 struct DefaultRunnerContext {
@@ -182,23 +170,32 @@ impl DefaultRunner {
         let source_file_path = Path::new(&context.source_file_path);
 
         let target_file_path =
-            PathBuf::from(&context.scratchpad_directory).join(&context.target_file_name);
+            Path::new(&context.scratchpad_directory).join(&context.target_file_name);
 
+        debug!("copying target file back to source file");
         fs::rename(target_file_path, source_file_path).map_err(CompletionError::UnableToMoveFile)
     }
 
     /// Runs the probe
-    fn run_probe(&self, probe: &str, context: &DefaultRunnerContext) -> ProbeResult {
+    fn run_probe(
+        &self,
+        probe: &str,
+        task_name: &str,
+        context: &DefaultRunnerContext,
+    ) -> ProbeResult {
         match run_script(
             probe,
-            HashMap::from([("OMZET_INPUT".to_owned(), context.target_file_name.clone())]),
+            HashMap::from([
+                ("OMZET_INPUT".to_owned(), context.target_file_name.clone()),
+                ("OMZET_TASK".to_owned(), String::from(task_name)),
+            ]),
             &context.scratchpad_directory,
         ) {
             Ok((exit_code, _output, _stderr)) => match exit_code {
-                0 => ProbeResult::ShouldRun,
-                _ => ProbeResult::ShouldSkip,
+                0 => ProbeResult::Run,
+                _ => ProbeResult::Skip,
             },
-            Err(_) => ProbeResult::ShouldAbort,
+            Err(_) => ProbeResult::Abort,
         }
     }
 
@@ -212,12 +209,15 @@ impl DefaultRunner {
         let result = run_script(&task.command, env_vars, &context.scratchpad_directory)
             .expect("failed to run task script");
 
+        // the file that the task should write to output
         let output_file_path =
             PathBuf::from(&context.scratchpad_directory).join(&context.output_file_name);
 
+        // the file that the task uses as input
         let target_file_path =
             PathBuf::from(&context.scratchpad_directory).join(&context.target_file_name);
 
+        // move the output file so it becomes the input file of any next task
         let task_completion_rename = fs::exists(&output_file_path)
             .map_err(|_| false)
             .and_then(|exists| {
@@ -233,7 +233,7 @@ impl DefaultRunner {
 
         if !task_completion_rename {
             warn!(
-                "task \"{}\" did not output any file, following tasks will work on the same source",
+                "task \"{}\" did not output any file, following task will work on the same source",
                 task.name
             );
         }
@@ -302,7 +302,8 @@ fn run_script(
     ))
 }
 
-impl Runner for DefaultRunner {
+/// The public interface of the the default runner
+impl WorkflowRunner for DefaultRunner {
     /// Will synchronously run the workflow's tasks
     /// and produce a [`WorkflowReport`]
     fn run_workflow(
@@ -320,14 +321,14 @@ impl Runner for DefaultRunner {
         let probe_results: Vec<(&Task, ProbeResult)> = tasks
             .iter()
             .map(|task| match &task.probe {
-                Some(probe) => (task, self.run_probe(probe, &context)),
-                None => (task, ProbeResult::ShouldRun),
+                Some(probe) => (task, self.run_probe(probe, &task.name, &context)),
+                None => (task, ProbeResult::Run),
             })
             .collect();
 
         let has_aborted_probe_result = probe_results
             .iter()
-            .any(|(_, probe_result)| *probe_result == ProbeResult::ShouldAbort);
+            .any(|(_, probe_result)| *probe_result == ProbeResult::Abort);
 
         if has_aborted_probe_result {
             return Err(RunnerError::ProbeAborted);
@@ -335,12 +336,12 @@ impl Runner for DefaultRunner {
 
         let tasks_to_run: Vec<&Task> = probe_results
             .into_iter()
-            .filter(|(_task, probe_result)| match probe_result {
-                ProbeResult::ShouldRun => true,
-                ProbeResult::ShouldSkip => false,
-                ProbeResult::ShouldAbort => false,
+            .filter(|(_, probe_result)| match probe_result {
+                ProbeResult::Run => true,
+                ProbeResult::Skip => false,
+                ProbeResult::Abort => false,
             })
-            .map(|(task, _probe_result)| task)
+            .map(|(task, _)| task)
             .collect();
 
         if tasks_to_run.is_empty() {
@@ -353,13 +354,13 @@ impl Runner for DefaultRunner {
         let mut task_reports: Vec<TaskReport> = vec![];
 
         for task in tasks_to_run.into_iter() {
-            info!("running task \"{}\"", task.name);
+            info!("task \"{}\" started", task.name);
 
             let task_run_result = self.run_task(task, &context);
 
             task_reports.push(task_run_result);
 
-            info!("completed task \"{}\"", task.name);
+            info!("task \"{}\" completed", task.name);
         }
 
         self.complete_run(&context)?;

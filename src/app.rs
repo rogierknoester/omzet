@@ -122,12 +122,11 @@ enum MonitorError {
 impl LibraryMonitor {
     fn start(&self) {
         loop {
-            debug!("performing library scan");
             if let Err(err) = self.tick() {
                 error!("error occurred during library monitoring, see below");
                 error!("{err}");
             }
-            sleep(Duration::from_secs(60));
+            sleep(Duration::from_secs(60 * 60));
         }
     }
 
@@ -136,10 +135,18 @@ impl LibraryMonitor {
     fn tick(&self) -> Result<(), MonitorError> {
         let library_path = Path::new(&self.library.directory);
 
+        info!("starting library scan");
+
         let files = scan_library(library_path, self.get_directory_glob())?;
 
+        info!("library scan completed, found {} files", files.len());
+
         for file_path in files {
-            self.dispatch_job(self.name.clone(), file_path.to_string_lossy().to_string());
+            self.dispatch_job(
+                self.name.clone(),
+                file_path.to_string_lossy().to_string(),
+                self.workflow.clone(),
+            );
         }
 
         Ok(())
@@ -147,8 +154,10 @@ impl LibraryMonitor {
 
     /// Dispatches a job so that a [`JobOrchestrator`] can pick it up
     /// and start doing something
-    fn dispatch_job(&self, library: String, file_path: String) {
-        if let Err(err) = self.job_sender.send(Box::new(Job::new(library, file_path))) {
+    fn dispatch_job(&self, library: String, file_path: String, workflow: Workflow) {
+        let job = Box::new(Job::new(library, file_path, workflow));
+
+        if let Err(err) = self.job_sender.send(job) {
             error!("unable to dispatch job for scanned file\n {err}");
         }
     }
