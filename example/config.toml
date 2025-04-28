@@ -1,18 +1,27 @@
-[libraries.main]
-directory = "/tmp/omzet/src"
-workflow = "example"
+[libraries.movies]
+directory = "/home/omzet/Movies"
+workflow = "movies"
 
 
-[workflows.example]
+[[workflows]]
+name = "movies"
 scratchpad_directory = "/tmp/omzet/cache"
+included_extensions = ["mkv", "mp4"]
+tasks = ["h265_encoder", "skipped_example_task"]
 
 
-[[workflows.example.tasks]]
-name = "h265 encoder"
+[[tasks]]
+id = "h265_encoder"
+description = "Encodes the file to be H265"
 probe = '''
-    echo "Probing if $OMZET_TASK is needed"
-    sleep 2 # doing some logic
-    exit 0 # an exit code of 0 indicates that the task needs to run
+    CODEC=$(ffprobe "$OMZET_INPUT" -show_entries stream=codec_name -select_streams v:0 -of compact=p=0:nk=1 -v 0)
+
+    echo "$CODEC"
+    if [ "$CODEC" == "hevc" ]; then
+        exit 1 # an exit code "1" indicates that the task is not necessary
+    else
+        exit 0
+    fi
 '''
 command = '''
     echo "input: $OMZET_INPUT"
@@ -21,7 +30,18 @@ command = '''
     ffmpeg -i $OMZET_INPUT -c:v libx265 -c:a copy -t 5 $OMZET_OUTPUT
 '''
 
-[[workflows.example.tasks]]
-name = "example: skipped probe"
+[[tasks]]
+id = "skipped_example_task"
+description = "A task that will always be skipped because of its exit code in the probe"
 probe = "exit 1"
+command = '''
+    echo "this will never be printed"
+'''
+
+[[tasks]]
+id = "always_running_task"
+description = "A task that will always run, because there is no probe"
+command = '''
+    echo "this will always be printed"
+'''
 

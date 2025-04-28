@@ -10,8 +10,9 @@ use globset::Glob;
 use tracing::{debug, error, info};
 
 use crate::{
-    config::{Config, ConfigError, Library},
-    job_orchestration::{Job, JobOrchestrator},
+    config::{Config, ConfigError},
+    job_orchestration::{JobOrchestrator, JobRequest},
+    workflow::Library,
     Workflow,
 };
 
@@ -38,33 +39,30 @@ impl App {
     pub(crate) fn run(&self) -> Result<(), Error> {
         let libraries = &self.config.libraries;
 
-        let mut library_threads = vec![];
+        let mut library_threads = Vec::with_capacity(libraries.len());
 
-        let (job_orchestrator, sender) = JobOrchestrator::new();
+        let (mut job_orchestrator, sender) = JobOrchestrator::new();
 
-        let orchestrator_handle = thread::Builder::new()
+        // create and move the job orchestrator to its own thread.
+        // this will allow it to always receive new directory scans
+        let _orchestrator_handle = thread::Builder::new()
             .name(String::from("job_orchestrator"))
             .spawn(move || {
                 job_orchestrator.start();
             });
 
-        for (library_name, library_config) in libraries.iter() {
-            debug!("starting library monitor for library {library_name}");
+        for library in libraries.iter() {
+            debug!("starting library monitor for library {}", library.name);
 
-            let workflow = self
-                .config
-                .get_workflow(&library_config.workflow)?
-                .to_owned();
-
-            let library = library_config.clone();
-            let name = library_name.clone();
+            let library = library.clone();
             let job_sender = sender.clone();
 
-            let thread_builder = thread::Builder::new().name(name.clone());
+            let thread_builder =
+                thread::Builder::new().name(format!("library-monitor({})", library.name.clone()));
 
             let handle = thread_builder
                 .spawn(move || {
-                    LibraryMonitor::new(name, library, workflow, job_sender).start();
+                    LibraryMonitor::new(library, job_sender).start();
                 })
                 .map_err(Error::CannotStartLibraryMonitor)?;
 
@@ -83,29 +81,23 @@ impl App {
 }
 
 struct LibraryMonitor {
-    name: String,
     library: Library,
-    workflow: Workflow,
-    job_sender: Sender<Box<Job>>,
+    job_sender: Sender<Box<JobRequest>>,
 }
 
 impl LibraryMonitor {
-    fn new(
-        name: String,
-        library: Library,
-        workflow: Workflow,
-        job_sender: Sender<Box<Job>>,
-    ) -> Self {
+    fn new(library: Library, job_sender: Sender<Box<JobRequest>>) -> Self {
         Self {
-            name,
             library,
-            workflow,
             job_sender,
         }
     }
 
     fn get_directory_glob(&self) -> String {
-        let extensions_part = format!(".{{{}}}", self.workflow.included_extensions.join(","));
+        let extensions_part = format!(
+            ".{{{}}}",
+            self.library.workflow.included_extensions.join(",")
+        );
         PathBuf::from(&self.library.directory)
             .join(format!("**/*{}", extensions_part))
             .to_string_lossy()
@@ -133,19 +125,17 @@ impl LibraryMonitor {
     /// Perform a "monitoring tick" for the library.
     /// Comes down to scanning all files within
     fn tick(&self) -> Result<(), MonitorError> {
-        let library_path = Path::new(&self.library.directory);
-
         info!("starting library scan");
 
-        let files = scan_library(library_path, self.get_directory_glob())?;
+        let files = scan_library(&self.library.directory, self.get_directory_glob())?;
 
         info!("library scan completed, found {} files", files.len());
 
         for file_path in files {
             self.dispatch_job(
-                self.name.clone(),
-                file_path.to_string_lossy().to_string(),
-                self.workflow.clone(),
+                self.library.name.clone(),
+                file_path,
+                self.library.workflow.clone(),
             );
         }
 
@@ -154,8 +144,8 @@ impl LibraryMonitor {
 
     /// Dispatches a job so that a [`JobOrchestrator`] can pick it up
     /// and start doing something
-    fn dispatch_job(&self, library: String, file_path: String, workflow: Workflow) {
-        let job = Box::new(Job::new(library, file_path, workflow));
+    fn dispatch_job(&self, library: String, file_path: PathBuf, workflow: Workflow) {
+        let job = Box::new(JobRequest::new(library, file_path, workflow));
 
         if let Err(err) = self.job_sender.send(job) {
             error!("unable to dispatch job for scanned file\n {err}");
@@ -175,7 +165,7 @@ enum ScanningError {
 
 /// Scan the library for matching files
 fn scan_library(path: &Path, glob_pattern: String) -> Result<Vec<PathBuf>, ScanningError> {
-    debug!("{}", glob_pattern);
+    debug!("scanning library with glob: {glob_pattern}");
 
     let paths = scan_directory_for_files(path)?;
 

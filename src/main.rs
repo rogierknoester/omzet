@@ -5,16 +5,16 @@ use std::{
 
 use app::App;
 use config::read_config;
-use runner::{DefaultRunner, SourceFilePath};
 use tracing::{debug, error, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use workflow::Workflow;
 
 mod app;
 mod config;
+mod db;
 mod job_orchestration;
-mod runner;
 mod workflow;
+mod workflow_runner;
 
 fn main() {
     setup_logging();
@@ -23,7 +23,7 @@ fn main() {
         Ok(config) => config,
         Err(err) => {
             error!("error occurred while trying to read configuration");
-            eprintln!("{}", err);
+            error!("{}", err);
 
             exit(1);
         }
